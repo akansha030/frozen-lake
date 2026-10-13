@@ -103,6 +103,7 @@ function blit(ctx,o){ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(o,0,
 
 function resize(){
   const nw=innerWidth,nh=innerHeight,dpr=Math.min(2,devicePixelRatio||1);
+  if(nw<2||nh<2){requestAnimationFrame(resize);return;}   // viewport not laid out yet
   if(nw===W&&nh===H&&dpr===DPR)return;
   let keepH=null,keepC=null;
   if(W){keepH=snap(cvH);keepC=snap(cvC);}
@@ -676,9 +677,9 @@ window.addEventListener('drop',e=>{
 let rz=0;
 window.addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(resize,150);});
 
-resize();
 requestAnimationFrame(frame);
 window.__lake={Sound,tips,segs,clusters};
+resize();
 })();
 </script>
 </body>
