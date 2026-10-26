@@ -462,7 +462,7 @@ const Fish=(()=>{
   // body geometry: s runs 0 (nose) → 1 (tail)
   const lateral=(f,s)=>f.len*(0.01+0.055*s*s)*Math.sin(TAU*0.85*s-f.phase)+f.bend*f.len*0.35*s*s;
   const halfW=(f,s)=>f.len*(0.012+0.115*Math.pow(Math.sin(Math.PI*clamp(Math.pow(Math.max(0,s),0.8),0,1)),0.9));
-  function body(ctx,f,k){
+  function body(ctx,f,k,outline){
     const L=f.len*k,X=s=>L*(0.45-s),Y=s=>lateral(f,s)*k,N=16;
     ctx.beginPath();
     for(let i=0;i<=N;i++){const s=i/N*0.86,hw=halfW(f,s)*k;if(i===0)ctx.moveTo(X(s),Y(s)+hw);else ctx.lineTo(X(s),Y(s)+hw);}
@@ -471,16 +471,29 @@ const Fish=(()=>{
     ctx.lineTo(X(0.93),Y(0.93));
     ctx.lineTo(X(1.04)+L*0.02,Y(0.98)-L*(0.14-flap));
     for(let i=N;i>=0;i--){const s=i/N*0.86,hw=halfW(f,s)*k;ctx.lineTo(X(s),Y(s)-hw);}
-    ctx.closePath();ctx.fill();
+    ctx.closePath();ctx.fill();if(outline)ctx.stroke();
     const sp=0.33,fl=Math.sin(f.phase*0.5)*0.02,hw=halfW(f,sp)*k;
     for(const side of [1,-1]){
       ctx.beginPath();
       ctx.moveTo(X(sp-0.06),Y(sp-0.06)+side*hw*0.9);
       ctx.lineTo(X(sp+0.16),Y(sp)+side*(hw+L*(0.13+fl)));
       ctx.lineTo(X(sp+0.1),Y(sp+0.1)+side*hw*0.9);
-      ctx.closePath();ctx.fill();
+      ctx.closePath();ctx.fill();if(outline)ctx.stroke();
     }
   }
+  // the fish as it looks once it is out on the ice: lit flanks, dark back, two eyes seen from above
+  function solid(ctx,f,k){
+    const L=f.len*k,g=ctx.createLinearGradient(0,-L*0.16,0,L*0.16);
+    g.addColorStop(0,'#9dbccf');g.addColorStop(0.5,'#2b4b63');g.addColorStop(1,'#9dbccf');
+    ctx.fillStyle=g;ctx.strokeStyle='rgba(255,255,255,0.75)';ctx.lineWidth=Math.max(0.7,L*0.008);ctx.lineJoin='round';
+    body(ctx,f,k,true);
+    ctx.strokeStyle='rgba(205,228,240,0.6)';ctx.lineWidth=Math.max(0.8,L*0.012);ctx.lineCap='round';
+    ctx.beginPath();for(let i=0;i<=10;i++){const s=i/10*0.82,px=L*(0.45-s),py=lateral(f,s)*k;if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}ctx.stroke();
+    const ex=L*0.35,ey=lateral(f,0.1)*k;ctx.fillStyle='#0f1f2b';
+    for(const side of [1,-1]){ctx.beginPath();ctx.arc(ex,ey+side*L*0.05,L*0.017,0,TAU);ctx.fill();}
+  }
+  const counterPoint=()=>{const r=scoreEl.querySelector('svg').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2};};
+  const LEAP=f=>f.school?0.32:0.5,FLY=f=>f.school?0.4:0.55;
   function swim(f,dt,now){
     f.age+=dt;
     let target=noise(f.seed+now*0.00012,f.seed*0.37)*f.wander;
@@ -491,7 +504,7 @@ const Fish=(()=>{
     f.turn=lerp(f.turn,target,Math.min(1,dt*1.5));
     f.heading+=f.turn*dt*(1+f.dart*2);
     f.speed=lerp(f.speed,f.baseSpeed*(1+f.dart*(f.dartMul-1)),Math.min(1,dt*4));
-    f.dart=Math.max(0,f.dart-dt/0.7);
+    f.dart=Math.max(0,f.dart-dt/0.7);f.flash=Math.max(0,(f.flash||0)-dt/0.18);
     f.x+=Math.cos(f.heading)*f.speed*dt;f.y+=Math.sin(f.heading)*f.speed*dt;
     f.phase+=dt*TAU*(0.7+f.speed/70);
     f.bend=lerp(f.bend,clamp(f.turn*0.8,-0.6,0.6),Math.min(1,dt*3));
@@ -520,7 +533,7 @@ const Fish=(()=>{
   function tap(x,y){
     const f=hitTest(x,y);
     if(!f){disturb(x,y,0.35);return 0;}
-    f.hits++;bubbles(x,y,6);
+    f.hits++;bubbles(x,y,6);f.flash=1;
     if(!f.school){lastHit=f;setPips(f.hits);}
     if(f.hits>=f.need){catchFish(f);return 2;}
     f.heading=Math.atan2(f.y-y,f.x-x)+rnd(-0.7,0.7);f.dart=1;f.turn=0;
@@ -538,6 +551,7 @@ const Fish=(()=>{
       aftershocks(cl,1);
     }
     chips(f.x,f.y,big?14:6);bubbles(f.x,f.y,big?12:5);
+    fx.push({kind:'plus',x:f.x,y:f.y-f.len*0.2,t:0,dur:1.1});
     Sound.fishCaught(f.x,big);
   }
   function update(now,dt){
@@ -548,8 +562,18 @@ const Fish=(()=>{
       if(f.state==='swim')swim(f,dt,now);
       else{
         f.t+=dt;
-        if(f.t>=0.35&&!f.counted){f.counted=true;count++;countEl.textContent=count;scoreEl.classList.remove('pop');void scoreEl.offsetWidth;scoreEl.classList.add('pop');if(!f.school)setTimeout(()=>setPips(0),300);if(lastHit===f)lastHit=null;}
-        if(f.t>0.9)f.dead=true;
+        const leap=LEAP(f),fly=FLY(f);
+        f.phase+=dt*TAU*5;
+        f.bend=0.45*Math.sin(f.t*26)*(f.t<leap?1:Math.max(0,1-(f.t-leap)/fly));
+        if(f.t>=leap&&!f.flight){const c=counterPoint();f.flight={x0:f.x,y0:f.y,x2:c.x,y2:c.y};}
+        if(f.t>=leap+fly&&!f.counted){
+          f.counted=true;count++;countEl.textContent=count;
+          scoreEl.classList.remove('pop');void scoreEl.offsetWidth;scoreEl.classList.add('pop');
+          fx.push({kind:'ring',x:f.flight.x2,y:f.flight.y2,r0:6,r1:30,t:0,dur:0.45});
+          if(!f.school)setPips(0);if(lastHit===f)lastHit=null;
+          Sound.collected(f.flight.x2);
+        }
+        if(f.t>leap+fly+0.05)f.dead=true;
       }
     }
     for(let i=list.length-1;i>=0;i--)if(list[i].dead)list.splice(i,1);
@@ -557,31 +581,45 @@ const Fish=(()=>{
   }
   // each shadow is blurred at quarter resolution in a scratch canvas, then upscaled: cheap, and softer
   const scratch=document.createElement('canvas'),sctx=scratch.getContext('2d'),SC=0.5;
-  function drawShadow(f,blur,alpha){
-    const pad=blur*2+12,cw=f.len*1.3+pad,ch=f.len*0.75+pad,sw=Math.ceil(cw*SC),sh=Math.ceil(ch*SC);
+  function drawShadow(f,blur,alpha,px,py,rot,k){
+    px=px===undefined?f.x:px;py=py===undefined?f.y:py;rot=rot===undefined?f.heading:rot;k=k||1;
+    const pad=blur*2+12,cw=f.len*k*1.3+pad,ch=f.len*k*0.75+pad,sw=Math.ceil(cw*SC),sh=Math.ceil(ch*SC);
     if(scratch.width<sw||scratch.height<sh){scratch.width=Math.max(scratch.width,sw);scratch.height=Math.max(scratch.height,sh);}
     sctx.setTransform(1,0,0,1,0,0);sctx.clearRect(0,0,sw,sh);
     const off=scratch.width+40;
     sctx.setTransform(SC,0,0,SC,sw/2-off,sh/2);
     sctx.shadowColor=`rgba(70,105,135,${alpha})`;sctx.shadowBlur=blur*SC;sctx.shadowOffsetX=off;sctx.shadowOffsetY=0;
-    sctx.fillStyle='#000';body(sctx,f,1);
+    sctx.fillStyle='#000';body(sctx,f,k);
     sctx.shadowColor='transparent';
-    fctx.save();fctx.translate(f.x,f.y);fctx.rotate(f.heading);
+    fctx.save();fctx.translate(px,py);fctx.rotate(rot);
     fctx.drawImage(scratch,0,0,sw,sh,-cw/2,-ch/2,cw,ch);
     fctx.restore();
   }
   function draw(){
     fctx.clearRect(0,0,W,H);xctx.clearRect(0,0,W,H);
     for(const f of list){
-      let blur=f.blur,alpha=f.alpha;
-      if(f.state==='caught'){blur=lerp(f.blur,1.5,smooth(0,0.3,f.t));alpha=(f.alpha+0.2)*(1-smooth(0.35,0.85,f.t));if(alpha<=0.01)continue;}
-      drawShadow(f,blur,alpha);
+      if(f.state==='swim'){drawShadow(f,f.blur,f.alpha+0.3*(f.flash||0));continue;}
+      // caught: up through the ice (shadow drops away beneath), then off to the counter
+      const leap=LEAP(f),fly=FLY(f);
+      let x=f.x,y=f.y,rot=f.heading+0.2*Math.sin(f.t*18),k,h,sa;
+      if(f.t<leap){const u=f.t/leap;h=smooth(0,0.35,u);k=0.9+0.4*smooth(0,0.3,u);sa=0.55;}
+      else{
+        const u=clamp((f.t-leap)/fly,0,1),e=u*u,fl=f.flight;
+        const cx=(fl.x0+fl.x2)/2,cy=Math.min(fl.y0,fl.y2)-120;
+        x=(1-e)*(1-e)*fl.x0+2*(1-e)*e*cx+e*e*fl.x2;y=(1-e)*(1-e)*fl.y0+2*(1-e)*e*cy+e*e*fl.y2;
+        const ang=Math.atan2(fl.y2-fl.y0,fl.x2-fl.x0);rot=f.heading+angDiff(ang,f.heading)*smooth(0,0.6,u);
+        h=1+u;k=lerp(1.3,0.12,e);sa=0.55*(1-u);
+      }
+      if(sa>0.01)drawShadow(f,8+6*h,sa,x+8*h,y+12*h,rot,k);
+      xctx.save();xctx.translate(x,y);xctx.rotate(rot);solid(xctx,f,k);xctx.restore();
     }
     for(const e of fx){
       if(e.t<0)continue;
       const p=e.t/e.dur;
       if(e.kind==='bub'){const x=e.x+e.vx*e.t+Math.sin(e.t*7+e.r)*2,y=e.y+e.vy*e.t;xctx.beginPath();xctx.arc(x,y,e.r,0,TAU);xctx.fillStyle=`rgba(255,255,255,${0.7*(1-p)})`;xctx.fill();}
-      else{const k=1-p*0.6,x=e.x+e.vx*e.t*k,y=e.y+e.vy*e.t*k;xctx.beginPath();xctx.arc(x,y,e.r*(1-p*0.5),0,TAU);xctx.fillStyle=`rgba(240,247,252,${0.95*(1-p)})`;xctx.fill();}
+      else if(e.kind==='chip'){const k=1-p*0.6,x=e.x+e.vx*e.t*k,y=e.y+e.vy*e.t*k;xctx.beginPath();xctx.arc(x,y,e.r*(1-p*0.5),0,TAU);xctx.fillStyle=`rgba(240,247,252,${0.95*(1-p)})`;xctx.fill();}
+      else if(e.kind==='ring'){const r=lerp(e.r0,e.r1,Math.pow(p,0.6));xctx.beginPath();xctx.arc(e.x,e.y,r,0,TAU);xctx.strokeStyle=`rgba(31,74,102,${0.6*(1-p)})`;xctx.lineWidth=2*(1-p)+0.4;xctx.stroke();}
+      else if(e.kind==='plus'){const y=e.y-46*smooth(0,1,p),a=1-smooth(0.55,1,p);xctx.font='600 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif';xctx.textAlign='center';xctx.textBaseline='middle';xctx.lineWidth=3;xctx.strokeStyle=`rgba(255,255,255,${0.9*a})`;xctx.strokeText('+1',e.x,y);xctx.fillStyle=`rgba(31,74,102,${a})`;xctx.fillText('+1',e.x,y);}
     }
   }
   function refreeze(){fx.length=0;for(const f of list){if(f.state==='caught')f.dead=true;}}
@@ -833,7 +871,16 @@ const Sound=(()=>{
     chirpOsc(x,{t,f0:90,f1:30,dur:0.6*g,gain:0.7*g});
     burst(x,{t,dur:0.08,freq:900,Q:0.6,gain:0.6*g});
     chirpOsc(x,{t:t+0.01,f0:1800,f1:200,dur:0.5*g,gain:0.25*g});
+    burst(x,{t:t+0.06,dur:0.025,freq:2600,Q:0.7,gain:0.3});
+    chirpOsc(x,{t:t+0.07,f0:480,f1:1150,dur:0.09,gain:0.12});
     for(let i=0;i<(big?6:3);i++)chirpOsc(x,{t:t+0.15+i*0.06+Math.random()*0.05,f0:250+Math.random()*300,f1:800+Math.random()*600,dur:0.07,gain:0.06});
+  }
+  function collected(x){
+    if(!on)return;
+    const t=ctx.currentTime+0.001;
+    chirpOsc(x,{t,f0:1046,f1:1046,dur:0.16,gain:0.11});
+    chirpOsc(x,{t:t+0.1,f0:1318,f1:1318,dur:0.26,gain:0.1});
+    chirpOsc(x,{t:t+0.1,f0:2636,f1:2636,dur:0.14,gain:0.025});
   }
   function setOn(v){
     init();on=v;
@@ -851,7 +898,7 @@ const Sound=(()=>{
     ambientNodes.push(s);
     setOn(true);
   }
-  return{setOn,crack,tick,scrape,scrapeStop,refreeze,useFile,fishHit,fishCaught,get on(){return on;}};
+  return{setOn,crack,tick,scrape,scrapeStop,refreeze,useFile,fishHit,fishCaught,collected,get on(){return on;}};
 })();
 
 /* ---------------------------------------------------------------- ui */
