@@ -39,6 +39,8 @@ button.primary:hover{background:rgba(31,74,102,1);}
 #pips{display:flex;gap:3px;margin-left:4px;}
 #pips i{width:5px;height:5px;border-radius:50%;background:rgba(31,74,102,.2);display:block;transition:background .15s,transform .15s;}
 #pips i.on{background:#1f4a66;transform:scale(1.15);}
+#toast{position:fixed;top:58px;right:16px;z-index:4;font-size:12px;font-weight:500;color:var(--ink);background:rgba(255,255,255,.6);border:1px solid rgba(31,74,102,.15);padding:6px 11px;border-radius:999px;opacity:0;transform:translateY(-4px);transition:opacity .4s,transform .4s;pointer-events:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
+#toast.in{opacity:1;transform:none;}
 @media (max-width:600px){#hint{right:18px;bottom:66px;line-height:1.4;}}
 </style>
 </head>
@@ -51,6 +53,7 @@ button.primary:hover{background:rgba(31,74,102,1);}
   <canvas id="fx"></canvas>
 </div>
 <div id="score" title="Fish caught"><svg viewBox="0 0 44 28"><path d="M2 14C7 5 18 2 27 8L37 2 34 14 37 26 27 20C18 26 7 23 2 14Z"/></svg><span id="count">0</span><span id="pips"><i></i><i></i><i></i></span></div>
+<div id="toast"></div>
 <div id="hint">R refreeze · M sound · drop an audio file anywhere to swap the ambience</div>
 <div id="ui">
   <button id="snd">Sound off</button>
@@ -59,7 +62,7 @@ button.primary:hover{background:rgba(31,74,102,1);}
 <div id="intro">
   <div class="card">
     <h1>Frozen lake</h1>
-    <p>Tap to crack it. Drag to score it. Hold still and let the pressure build.<br>Fish drift under the ice. Hit one three times to break it out.</p>
+    <p>Tap to crack it. Drag to score it. Hold still and let the pressure build.<br>Fish drift under the ice. Hit one three times to break it loose.</p>
     <div class="row">
       <button class="primary" id="enterSound">Enter with sound</button>
       <button id="enterQuiet">Enter quietly</button>
@@ -417,22 +420,45 @@ function buildGhosts(rng){
 
 /* ---------------------------------------------------------------- fish under the ice */
 const Fish=(()=>{
-  const HITS=3;
-  const list=[],holes=[],fx=[];
-  let spawnAt=0,lastHit=null,count=0;
-  const scoreEl=document.getElementById('score'),countEl=document.getElementById('count'),pipEls=[...document.querySelectorAll('#pips i')];
+  const list=[],fx=[];
+  let spawnAt=0,schoolAt=0,lastHit=null,count=0,toastTimer=0;
+  const scoreEl=document.getElementById('score'),countEl=document.getElementById('count'),toastEl=document.getElementById('toast'),pipEls=[...document.querySelectorAll('#pips i')];
   const scaleL=()=>clamp(Math.min(W,H)/900,0.7,1.2);
-
-  function spawn(now){
-    const L=rnd(115,190)*scaleL(),m=L*0.8,edge=Math.floor(rnd(4));let x,y;
-    if(edge===0){x=-m;y=rnd(H*0.15,H*0.85);}else if(edge===1){x=W+m;y=rnd(H*0.15,H*0.85);}
-    else if(edge===2){x=rnd(W*0.15,W*0.85);y=-m;}else{x=rnd(W*0.15,W*0.85);y=H+m;}
-    const tx=rnd(W*0.25,W*0.75),ty=rnd(H*0.25,H*0.75);
-    const f={x,y,heading:Math.atan2(ty-y,tx-x),len:L,baseSpeed:rnd(22,48)*scaleL(),turn:0,bend:0,phase:rnd(TAU),seed:rnd(1000),
-      blur:rnd(6,13),hits:0,dart:0,age:0,state:'swim',t:0,counted:false};
-    f.speed=f.baseSpeed;f.alpha=0.92-f.blur*0.035;
-    list.push(f);
+  // three kinds of swimmer: slow drifters, mid-pace cruisers, and fast ones that zoom straight across
+  const TIERS=[
+    {w:0.35,speed:[16,28],len:[140,200],blur:[9,14],wander:0.5,dart:7,steer:true},
+    {w:0.40,speed:[40,65],len:[110,160],blur:[6,11],wander:0.5,dart:4,steer:true},
+    {w:0.25,speed:[130,200],len:[95,145],blur:[5,9],wander:0.12,dart:1.6,steer:false}
+  ];
+  function pickTier(){let r=Math.random();for(const t of TIERS){if(r<t.w)return t;r-=t.w;}return TIERS[1];}
+  function edgeStart(m){
+    const edge=Math.floor(rnd(4));
+    if(edge===0)return{edge,x:-m,y:rnd(H*0.15,H*0.85)};
+    if(edge===1)return{edge,x:W+m,y:rnd(H*0.15,H*0.85)};
+    if(edge===2)return{edge,x:rnd(W*0.15,W*0.85),y:-m};
+    return{edge,x:rnd(W*0.15,W*0.85),y:H+m};
   }
+  const farSide=(e,m)=>({x:e.edge===0?W+m:e.edge===1?-m:rnd(W*0.2,W*0.8),y:e.edge===2?H+m:e.edge===3?-m:rnd(H*0.2,H*0.8)});
+  function make(o){
+    const f={x:o.x,y:o.y,heading:o.heading,len:o.len,baseSpeed:o.speed,speed:o.speed,turn:0,bend:0,phase:rnd(TAU),seed:rnd(1000),
+      blur:o.blur,hits:0,need:o.need,dart:0,dartMul:o.dartMul,wander:o.wander,steer:o.steer,school:!!o.school,age:0,state:'swim',t:0,counted:false};
+    f.alpha=0.92-f.blur*0.035;list.push(f);return f;
+  }
+  function spawn(){
+    const t=pickTier(),k=scaleL(),L=rnd(t.len[0],t.len[1])*k,e=edgeStart(L*0.8);
+    const aim=t.steer?{x:rnd(W*0.25,W*0.75),y:rnd(H*0.25,H*0.75)}:farSide(e,L);
+    make({x:e.x,y:e.y,heading:Math.atan2(aim.y-e.y,aim.x-e.x),len:L,speed:rnd(t.speed[0],t.speed[1])*k,blur:rnd(t.blur[0],t.blur[1]),need:3,dartMul:t.dart,wander:t.wander,steer:t.steer});
+  }
+  function spawnSchool(){
+    const k=scaleL(),n=8+Math.floor(rnd(5)),e=edgeStart(240),aim=farSide(e,200);
+    const h=Math.atan2(aim.y-e.y,aim.x-e.x),c=Math.cos(h),sn=Math.sin(h),v=rnd(210,260)*k;
+    for(let i=0;i<n;i++){
+      const along=rnd(-170,170),across=rnd(-100,100);
+      make({x:e.x+c*along-sn*across,y:e.y+sn*along+c*across,heading:h+rnd(-0.08,0.08),len:rnd(45,70)*k,speed:v*rnd(0.92,1.08),blur:rnd(5,8),need:1,dartMul:1.3,wander:0.05,steer:false,school:true});
+    }
+    toast('A school is passing. One tap each.');
+  }
+  function toast(msg){toastEl.textContent=msg;toastEl.classList.add('in');clearTimeout(toastTimer);toastTimer=setTimeout(()=>toastEl.classList.remove('in'),3200);}
   // body geometry: s runs 0 (nose) → 1 (tail)
   const lateral=(f,s)=>f.len*(0.01+0.055*s*s)*Math.sin(TAU*0.85*s-f.phase)+f.bend*f.len*0.35*s*s;
   const halfW=(f,s)=>f.len*(0.012+0.115*Math.pow(Math.sin(Math.PI*clamp(Math.pow(Math.max(0,s),0.8),0,1)),0.9));
@@ -457,22 +483,24 @@ const Fish=(()=>{
   }
   function swim(f,dt,now){
     f.age+=dt;
-    let target=noise(f.seed+now*0.00012,f.seed*0.37)*0.5;
-    const m=60,out=f.x<m||f.x>W-m||f.y<m||f.y>H-m;
-    if(out&&f.age>1.5){const a=Math.atan2(H/2-f.y,W/2-f.x);target+=clamp(angDiff(a,f.heading),-1,1)*0.9;}
+    let target=noise(f.seed+now*0.00012,f.seed*0.37)*f.wander;
+    if(f.steer){
+      const m=60,out=f.x<m||f.x>W-m||f.y<m||f.y>H-m;
+      if(out&&f.age>1.5){const a=Math.atan2(H/2-f.y,W/2-f.x);target+=clamp(angDiff(a,f.heading),-1,1)*0.9;}
+    }
     f.turn=lerp(f.turn,target,Math.min(1,dt*1.5));
     f.heading+=f.turn*dt*(1+f.dart*2);
-    f.speed=lerp(f.speed,f.baseSpeed*(1+f.dart*5.5),Math.min(1,dt*4));
+    f.speed=lerp(f.speed,f.baseSpeed*(1+f.dart*(f.dartMul-1)),Math.min(1,dt*4));
     f.dart=Math.max(0,f.dart-dt/0.7);
     f.x+=Math.cos(f.heading)*f.speed*dt;f.y+=Math.sin(f.heading)*f.speed*dt;
     f.phase+=dt*TAU*(0.7+f.speed/70);
     f.bend=lerp(f.bend,clamp(f.turn*0.8,-0.6,0.6),Math.min(1,dt*3));
-    const mm=f.len;
-    if(f.age>8&&(f.x<-mm||f.x>W+mm||f.y<-mm||f.y>H+mm)){f.dead=true;if(lastHit===f){lastHit=null;setPips(0);}}
+    const mm=f.len+40,gone=f.x<-mm||f.x>W+mm||f.y<-mm||f.y>H+mm;
+    if(gone&&f.age>(f.steer?8:f.school?4:2.5)){f.dead=true;if(lastHit===f){lastHit=null;setPips(0);}}
   }
   function setPips(n){pipEls.forEach((e,i)=>e.classList.toggle('on',i<n));}
   function bubbles(x,y,n){for(let i=0;i<n;i++)fx.push({kind:'bub',x:x+rnd(-8,8),y:y+rnd(-8,8),vx:rnd(-6,6),vy:rnd(-14,-4),r:rnd(0.8,2.4),t:-Math.random()*0.2,dur:rnd(0.8,1.5)});}
-  function droplets(x,y,n){for(let i=0;i<n;i++){const a=rnd(TAU),v=rnd(40,140);fx.push({kind:'drop',x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-60,r:rnd(1,2.6),t:0,dur:rnd(0.5,0.8)});}}
+  function chips(x,y,n){for(let i=0;i<n;i++){const a=rnd(TAU),v=rnd(60,180);fx.push({kind:'chip',x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:rnd(0.8,2.2),t:0,dur:rnd(0.35,0.6)});}}
   function hitTest(x,y){
     let best=null,bd=1e9;
     for(const f of list){
@@ -487,90 +515,76 @@ const Fish=(()=>{
   }
   function disturb(x,y,k,except){
     for(const f of list){if(f===except||f.state!=='swim')continue;const d=Math.hypot(f.x-x,f.y-y);
-      if(d<220){f.dart=Math.max(f.dart,k*(1-d/220));if(Math.random()<0.5)f.heading+=rnd(-0.4,0.4);}}
+      if(d<220){f.dart=Math.max(f.dart,k*(1-d/220));if(Math.random()<0.5&&f.steer)f.heading+=rnd(-0.4,0.4);}}
   }
-  function tap(x,y,now){
+  function tap(x,y){
     const f=hitTest(x,y);
     if(!f){disturb(x,y,0.35);return 0;}
-    f.hits++;lastHit=f;setPips(f.hits);bubbles(x,y,8);
-    if(f.hits>=HITS){catchFish(f);return 2;}
+    f.hits++;bubbles(x,y,6);
+    if(!f.school){lastHit=f;setPips(f.hits);}
+    if(f.hits>=f.need){catchFish(f);return 2;}
     f.heading=Math.atan2(f.y-y,f.x-x)+rnd(-0.7,0.7);f.dart=1;f.turn=0;
     Sound.fishHit(x);disturb(x,y,0.3,f);
     return 1;
   }
+  // the ice over the fish shatters; the shadow rises to the surface and is gone
   function catchFish(f){
     f.state='caught';f.t=0;f.dart=0;
-    const r=f.len*0.34,verts=[];
-    for(let i=0;i<18;i++)verts.push(rnd(0.84,1.16));
-    const hole={x:f.x+Math.cos(f.heading)*f.len*0.05,y:f.y+Math.sin(f.heading)*f.len*0.05,r,rx:f.len*0.66,ry:f.len*0.34,rot:f.heading,verts,t:0,dur:11};
-    holes.push(hole);f.hole=hole;
-    // the ice gives way: jagged rim + cracks radiating from the hole
-    const cl=newCluster();
-    for(const ctx of [cctx,hctx]){ctx.save();ctx.lineJoin='round';
-      ctx.strokeStyle=ctx===cctx?'rgba(255,255,255,0.95)':'rgba(255,255,255,0.35)';ctx.lineWidth=ctx===cctx?2.2:12;
-      holePath(ctx,holes[holes.length-1]);ctx.stroke();ctx.restore();}
-    const n=6+Math.floor(rnd(3)),base=rnd(TAU);
-    for(let i=0;i<n;i++){const a=base+i*TAU/n+rnd(-0.3,0.3);
-      const rel=a-f.heading,rr=0.95/Math.hypot(Math.cos(rel)/hole.rx,Math.sin(rel)/hole.ry);
-      spawnTip({x:hole.x+Math.cos(a)*rr,y:hole.y+Math.sin(a)*rr,dir:a,energy:rnd(0.55,1),w0:rnd(1.4,2.3),depth:0,cluster:cl,skip:1});}
-    aftershocks(cl,1);
-    for(let i=0;i<3;i++)fx.push({kind:'ring',x:hole.x,y:hole.y,r0:r*0.3,r1:r*2.6,t:-i*0.16,dur:1.1});
-    droplets(f.x,f.y,14);bubbles(f.x,f.y,10);
-    Sound.catchSplash(f.x);
-  }
-  function holePath(ctx,h){
-    ctx.beginPath();
-    const c=Math.cos(h.rot),sn=Math.sin(h.rot);
-    for(let i=0;i<h.verts.length;i++){const a=i/h.verts.length*TAU,k=h.verts[i],ex=Math.cos(a)*h.rx*k,ey=Math.sin(a)*h.ry*k;
-      const px=h.x+ex*c-ey*sn,py=h.y+ex*sn+ey*c;if(i===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);}
-    ctx.closePath();
+    const cl=newCluster(),big=!f.school;
+    impact(f.x,f.y,big?1:0.55,cl);
+    if(big){
+      const n=5,base=rnd(TAU);
+      for(let i=0;i<n;i++)spawnTip({x:f.x,y:f.y,dir:base+i*TAU/n+rnd(-0.3,0.3),energy:rnd(0.8,1.2),w0:rnd(1.6,2.4),depth:0,cluster:cl,skip:1});
+      aftershocks(cl,1);
+    }
+    chips(f.x,f.y,big?14:6);bubbles(f.x,f.y,big?12:5);
+    Sound.fishCaught(f.x,big);
   }
   function update(now,dt){
-    if(list.filter(f=>f.state==='swim').length<2&&now>spawnAt){spawn(now);spawnAt=now+rnd(2500,7000);}
+    if(list.filter(f=>f.state==='swim'&&!f.school).length<3&&now>spawnAt){spawn();spawnAt=now+rnd(1200,3500);}
+    if(!schoolAt)schoolAt=now+rnd(14000,22000);
+    if(now>schoolAt&&!list.some(f=>f.school)){spawnSchool();schoolAt=now+rnd(28000,48000);}
     for(const f of list){
       if(f.state==='swim')swim(f,dt,now);
-      else{f.t+=dt;if(f.t>=0.45&&!f.counted){f.counted=true;count++;countEl.textContent=count;scoreEl.classList.remove('pop');void scoreEl.offsetWidth;scoreEl.classList.add('pop');setTimeout(()=>setPips(0),350);if(lastHit===f)lastHit=null;}
-        if(f.t>1)f.dead=true;}
+      else{
+        f.t+=dt;
+        if(f.t>=0.35&&!f.counted){f.counted=true;count++;countEl.textContent=count;scoreEl.classList.remove('pop');void scoreEl.offsetWidth;scoreEl.classList.add('pop');if(!f.school)setTimeout(()=>setPips(0),300);if(lastHit===f)lastHit=null;}
+        if(f.t>0.9)f.dead=true;
+      }
     }
     for(let i=list.length-1;i>=0;i--)if(list[i].dead)list.splice(i,1);
-    for(let i=holes.length-1;i>=0;i--){holes[i].t+=dt;if(holes[i].t>holes[i].dur)holes.splice(i,1);}
     for(let i=fx.length-1;i>=0;i--){const e=fx[i];e.t+=dt;if(e.t>e.dur)fx.splice(i,1);}
+  }
+  // each shadow is blurred at quarter resolution in a scratch canvas, then upscaled: cheap, and softer
+  const scratch=document.createElement('canvas'),sctx=scratch.getContext('2d'),SC=0.5;
+  function drawShadow(f,blur,alpha){
+    const pad=blur*2+12,cw=f.len*1.3+pad,ch=f.len*0.75+pad,sw=Math.ceil(cw*SC),sh=Math.ceil(ch*SC);
+    if(scratch.width<sw||scratch.height<sh){scratch.width=Math.max(scratch.width,sw);scratch.height=Math.max(scratch.height,sh);}
+    sctx.setTransform(1,0,0,1,0,0);sctx.clearRect(0,0,sw,sh);
+    const off=scratch.width+40;
+    sctx.setTransform(SC,0,0,SC,sw/2-off,sh/2);
+    sctx.shadowColor=`rgba(70,105,135,${alpha})`;sctx.shadowBlur=blur*SC;sctx.shadowOffsetX=off;sctx.shadowOffsetY=0;
+    sctx.fillStyle='#000';body(sctx,f,1);
+    sctx.shadowColor='transparent';
+    fctx.save();fctx.translate(f.x,f.y);fctx.rotate(f.heading);
+    fctx.drawImage(scratch,0,0,sw,sh,-cw/2,-ch/2,cw,ch);
+    fctx.restore();
   }
   function draw(){
     fctx.clearRect(0,0,W,H);xctx.clearRect(0,0,W,H);
-    // open water in the holes, refreezing from the rim inward
-    for(const h of holes){
-      const p=clamp(h.t/h.dur,0,1),a=Math.pow(1-p,1.6);
-      const g=fctx.createRadialGradient(h.x,h.y,h.ry*0.1,h.x,h.y,h.rx);
-      g.addColorStop(0,`rgba(34,70,100,${0.95*a})`);g.addColorStop(0.7,`rgba(48,88,118,${0.9*a})`);g.addColorStop(1,`rgba(110,145,170,${0.7*a})`);
-      fctx.fillStyle=g;holePath(fctx,h);fctx.fill();
-      const skin=0.8*smooth(0.1,0.55,p)*(1-smooth(0.8,1,p));
-      if(skin>0.01){xctx.fillStyle=`rgba(222,236,245,${skin})`;holePath(xctx,h);xctx.fill();}
-    }
-    // shadows of the fish seen through the ice
-    const OFF=W+600;
     for(const f of list){
-      if(f.state!=='swim')continue;
-      fctx.save();fctx.translate(f.x-OFF,f.y);fctx.rotate(f.heading);
-      fctx.shadowColor=`rgba(70,105,135,${f.alpha})`;fctx.shadowBlur=f.blur*DPR;fctx.shadowOffsetX=OFF*DPR;fctx.shadowOffsetY=0;
-      fctx.fillStyle='#000';body(fctx,f,1);fctx.restore();
-    }
-    // a caught fish surfaces in the open water, then is gone
-    for(const f of list){
-      if(f.state!=='caught')continue;
-      const k=1+0.15*smooth(0,0.45,f.t),a=f.t<0.45?0.9:0.9*(1-smooth(0.45,0.9,f.t));
-      xctx.save();if(f.hole){holePath(xctx,f.hole);xctx.clip();}
-      xctx.translate(f.x,f.y);xctx.rotate(f.heading);xctx.fillStyle=`rgba(168,192,206,${a})`;body(xctx,f,k);xctx.restore();
+      let blur=f.blur,alpha=f.alpha;
+      if(f.state==='caught'){blur=lerp(f.blur,1.5,smooth(0,0.3,f.t));alpha=(f.alpha+0.2)*(1-smooth(0.35,0.85,f.t));if(alpha<=0.01)continue;}
+      drawShadow(f,blur,alpha);
     }
     for(const e of fx){
       if(e.t<0)continue;
       const p=e.t/e.dur;
       if(e.kind==='bub'){const x=e.x+e.vx*e.t+Math.sin(e.t*7+e.r)*2,y=e.y+e.vy*e.t;xctx.beginPath();xctx.arc(x,y,e.r,0,TAU);xctx.fillStyle=`rgba(255,255,255,${0.7*(1-p)})`;xctx.fill();}
-      else if(e.kind==='drop'){const x=e.x+e.vx*e.t,y=e.y+e.vy*e.t+220*e.t*e.t;xctx.beginPath();xctx.arc(x,y,e.r*(1-p*0.5),0,TAU);xctx.fillStyle=`rgba(235,245,250,${0.9*(1-p)})`;xctx.fill();}
-      else if(e.kind==='ring'){const r=lerp(e.r0,e.r1,Math.pow(p,0.6));xctx.beginPath();xctx.arc(e.x,e.y,r,0,TAU);xctx.strokeStyle=`rgba(255,255,255,${0.55*(1-p)})`;xctx.lineWidth=1.5*(1-p)+0.4;xctx.stroke();}
+      else{const k=1-p*0.6,x=e.x+e.vx*e.t*k,y=e.y+e.vy*e.t*k;xctx.beginPath();xctx.arc(x,y,e.r*(1-p*0.5),0,TAU);xctx.fillStyle=`rgba(240,247,252,${0.95*(1-p)})`;xctx.fill();}
     }
   }
-  function refreeze(){holes.length=0;fx.length=0;for(const f of list){if(f.state==='caught')f.dead=true;}}
+  function refreeze(){fx.length=0;for(const f of list){if(f.state==='caught')f.dead=true;}}
   return{update,draw,tap,disturb,refreeze,show(){scoreEl.classList.add('in');},get list(){return list;},get count(){return count;}};
 })();
 
@@ -610,7 +624,7 @@ stage.addEventListener('pointerdown',e=>{
   const now=performance.now(),f=rnd(0.5,1),cl=newCluster();
   pointers.set(e.pointerId,{id:e.pointerId,x:e.clientX,y:e.clientY,lnx:e.clientX,lny:e.clientY,down:now,lastMove:now,lastGrow:now,lastT:now,
     cluster:cl,trailAcc:0,nodes:0,side:1,speed:0,held:0,sinceStar:0,nextStar:rnd(25,45)});
-  const fishHit=Fish.tap(e.clientX,e.clientY,now);
+  const fishHit=Fish.tap(e.clientX,e.clientY);
   if(fishHit===2)return;                      // the ice broke open; the catch drew its own cracks
   impact(e.clientX,e.clientY,fishHit?Math.max(f,0.7):f,cl);
   Sound.crack(e.clientX,f);
@@ -813,18 +827,13 @@ const Sound=(()=>{
     burst(x,{t,dur:0.03,freq:600,Q:0.8,gain:0.35});
     for(let i=0;i<3;i++)chirpOsc(x,{t:t+0.08+i*0.07+Math.random()*0.04,f0:300+Math.random()*200,f1:900+Math.random()*400,dur:0.06,gain:0.05});
   }
-  function catchSplash(x){
+  function fishCaught(x,big){
     if(!on)return;
-    const t=ctx.currentTime+0.001;
-    chirpOsc(x,{t,f0:90,f1:30,dur:0.6,gain:0.7});
-    burst(x,{t,dur:0.08,freq:900,Q:0.6,gain:0.6});
-    const s=ctx.createBufferSource();s.buffer=noiseBuf;
-    const f=ctx.createBiquadFilter();f.type='lowpass';
-    f.frequency.setValueAtTime(400,t+0.1);f.frequency.exponentialRampToValueAtTime(2500,t+0.25);f.frequency.exponentialRampToValueAtTime(300,t+0.7);
-    const g=ctx.createGain();env(g,t+0.1,0.35,0.05,0.7);
-    s.connect(f);f.connect(g);out(g,x);s.start(t+0.1,Math.random());s.stop(t+0.9);
-    chirpOsc(x,{t:t+0.12,f0:520,f1:140,dur:0.18,gain:0.25});
-    for(let i=0;i<6;i++)chirpOsc(x,{t:t+0.2+i*0.06+Math.random()*0.05,f0:250+Math.random()*300,f1:800+Math.random()*600,dur:0.07,gain:0.06});
+    const t=ctx.currentTime+0.001,g=big?1:0.6;
+    chirpOsc(x,{t,f0:90,f1:30,dur:0.6*g,gain:0.7*g});
+    burst(x,{t,dur:0.08,freq:900,Q:0.6,gain:0.6*g});
+    chirpOsc(x,{t:t+0.01,f0:1800,f1:200,dur:0.5*g,gain:0.25*g});
+    for(let i=0;i<(big?6:3);i++)chirpOsc(x,{t:t+0.15+i*0.06+Math.random()*0.05,f0:250+Math.random()*300,f1:800+Math.random()*600,dur:0.07,gain:0.06});
   }
   function setOn(v){
     init();on=v;
@@ -842,7 +851,7 @@ const Sound=(()=>{
     ambientNodes.push(s);
     setOn(true);
   }
-  return{setOn,crack,tick,scrape,scrapeStop,refreeze,useFile,fishHit,catchSplash,get on(){return on;}};
+  return{setOn,crack,tick,scrape,scrapeStop,refreeze,useFile,fishHit,fishCaught,get on(){return on;}};
 })();
 
 /* ---------------------------------------------------------------- ui */
